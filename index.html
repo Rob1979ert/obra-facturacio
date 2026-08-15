@@ -170,8 +170,11 @@
 
     <div class="card">
       <h2>Descripció de la feina d'avui</h2>
-      <button class="btn-secondary" id="btnVeu" onclick="toggleVeu()">🎤 Dictar per veu</button>
-      <textarea id="notaText" placeholder="Descripció de la feina feta avui (pots dictar-la amb el botó de veu o escriure-la)"></textarea>
+      <div class="row">
+        <button class="btn-secondary" id="btnVeu" onclick="toggleVeu()">🎤 Dictar per veu</button>
+        <button class="btn-secondary" onclick="novaLiniaNota()">↵ Separar en punts</button>
+      </div>
+      <textarea id="notaText" placeholder="Descripció de la feina feta avui. Si has fet diverses feines, prem &quot;Separar en punts&quot; entre cada una perquè surtin com a línies diferents a la factura."></textarea>
       <div class="row">
         <button class="btn-primary" onclick="guardarNota()">Guardar descripció</button>
         <button class="btn-danger" onclick="descartarNota()">Descartar</button>
@@ -235,6 +238,8 @@
       <button class="btn-outline" onclick="omplirDesDeAvui()">Omplir amb la feina d'avui</button>
       <div id="conceptesLlista"></div>
       <button class="btn-secondary" onclick="afegirConcepte()">+ Afegir línia</button>
+      <div class="footnote">En escriure una descripció que ja has fet servir abans, es suggereix automàticament el darrer preu.</div>
+      <datalist id="materialsHistoric"></datalist>
     </div>
 
     <div class="card">
@@ -660,6 +665,16 @@ async function guardarNota(){
   toast(document.getElementById('notaStatus'), 'Descripció guardada.', 'ok');
   renderHistorial();
 }
+function novaLiniaNota(){
+  const textarea = document.getElementById('notaText');
+  const pos = textarea.selectionStart != null ? textarea.selectionStart : textarea.value.length;
+  const abans = textarea.value.slice(0, pos).replace(/\s+$/,'');
+  const despres = textarea.value.slice(pos);
+  textarea.value = abans + '\n' + despres;
+  textarea.focus();
+  const novaPos = abans.length + 1;
+  textarea.setSelectionRange(novaPos, novaPos);
+}
 function descartarNota(){
   const textarea = document.getElementById('notaText');
   if(!textarea.value.trim()) return;
@@ -811,13 +826,44 @@ function afegirConcepte(desc, qty, preu){
   div.className = 'concepte-row';
   div.id = id;
   div.innerHTML = `
-    <div class="desc"><input type="text" placeholder="Descripció" value="${desc?desc.replace(/"/g,'&quot;'):''}" oninput="recalcularTotals()"></div>
+    <div class="desc"><input type="text" list="materialsHistoric" placeholder="Descripció" value="${desc?desc.replace(/"/g,'&quot;'):''}" oninput="onDescConcepteInput(this)"></div>
     <div class="qty"><input type="number" placeholder="Qtat" step="0.01" value="${qty!=null?qty:1}" oninput="recalcularTotals()"></div>
     <div class="preu"><input type="number" placeholder="Preu €" step="0.01" value="${preu!=null?preu:''}" oninput="recalcularTotals()"></div>
     <button type="button" class="del" onclick="document.getElementById('${id}').remove(); recalcularTotals();">✕</button>
   `;
   document.getElementById('conceptesLlista').appendChild(div);
   recalcularTotals();
+}
+function onDescConcepteInput(inputEl){
+  const desc = inputEl.value.trim();
+  const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
+  const match = hist[desc.toLowerCase()];
+  if(match){
+    const row = inputEl.closest('.concepte-row');
+    const preuInput = row ? row.querySelector('.preu input') : null;
+    if(preuInput && (!preuInput.value || parseFloat(preuInput.value) === 0)){
+      preuInput.value = match.preu;
+    }
+  }
+  recalcularTotals();
+}
+function refrescarDatalistMaterials(){
+  const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
+  const dl = document.getElementById('materialsHistoric');
+  if(!dl) return;
+  dl.innerHTML = Object.values(hist)
+    .map(m => `<option value="${m.desc.replace(/"/g,'&quot;')}">${eur(m.preu)}</option>`)
+    .join('');
+}
+function actualitzarHistoricMaterials(conceptes){
+  const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
+  conceptes.forEach(c=>{
+    if(c.desc && c.preu > 0){
+      hist[c.desc.toLowerCase()] = {desc: c.desc, preu: c.preu, updated: ara()};
+    }
+  });
+  localStorage.setItem('historicMaterials', JSON.stringify(hist));
+  refrescarDatalistMaterials();
 }
 function llegirConceptes(){
   const rows = document.querySelectorAll('#conceptesLlista .concepte-row');
@@ -858,6 +904,7 @@ async function omplirDesDeAvui(){
   const avui = all.filter(e => e.obra === obraActual && e.data === avuiISO());
   const jornades = avui.filter(e=>e.tipus==='jornada');
   const materials = avui.filter(e=>e.tipus==='material');
+  const notes = avui.filter(e=>e.tipus==='nota');
 
   const horesTotal = jornades.reduce((s,j)=> s + (j.horesTreballades||0), 0);
   document.getElementById('conceptesLlista').innerHTML = '';
@@ -865,10 +912,21 @@ async function omplirDesDeAvui(){
   if(horesTotal > 0){
     afegirConcepte(`Mà d'obra — ${obraActual} (${fmtData(avuiISO())})`, horesTotal, preuHora);
   }
-  materials.forEach(m=>{
-    afegirConcepte(m.materialDescripcio, parseFloat(m.materialQuantitat)||1, 0);
+  // Cada punt/paràgraf de la descripció es converteix en una línia independent,
+  // en lloc de quedar tot amuntegat en una sola frase.
+  notes.forEach(n=>{
+    (n.notaText || '').split(/\n+/).map(t=>t.trim()).filter(Boolean).forEach(linia=>{
+      const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
+      const match = hist[linia.toLowerCase()];
+      afegirConcepte(linia, 1, match ? match.preu : 0);
+    });
   });
-  if(horesTotal===0 && materials.length===0){
+  materials.forEach(m=>{
+    const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
+    const match = hist[m.materialDescripcio.toLowerCase()];
+    afegirConcepte(m.materialDescripcio, parseFloat(m.materialQuantitat)||1, match ? match.preu : 0);
+  });
+  if(horesTotal===0 && notes.length===0 && materials.length===0){
     afegirConcepte();
   }
   recalcularTotals();
@@ -909,6 +967,7 @@ async function generarFactura(){
     timestamp: ara()
   };
   await afegirFactura(factura);
+  actualitzarHistoricMaterials(conceptes);
 
   const numActual = parseInt(numero.replace(/\D/g,''));
   const suggeritActual = parseInt(String(proximNumeroSuggerit()).replace(/\D/g,''));
@@ -1086,6 +1145,7 @@ function canviarVista(nom){
   refrescarSeccionsAvui();
   renderHistorial();
   carregarLesMevesDades();
+  refrescarDatalistMaterials();
   inicialitzarFormFactura();
   renderLlistaFactures();
 })();
