@@ -172,7 +172,10 @@
       <h2>Descripció de la feina d'avui</h2>
       <button class="btn-secondary" id="btnVeu" onclick="toggleVeu()">🎤 Dictar per veu</button>
       <textarea id="notaText" placeholder="Descripció de la feina feta avui (pots dictar-la amb el botó de veu o escriure-la)"></textarea>
-      <button class="btn-primary" onclick="guardarNota()">Guardar descripció</button>
+      <div class="row">
+        <button class="btn-primary" onclick="guardarNota()">Guardar descripció</button>
+        <button class="btn-danger" onclick="descartarNota()">Descartar</button>
+      </div>
       <div id="notaStatus"></div>
     </div>
 
@@ -590,7 +593,7 @@ function initReconeixement(){
   if(!SR) return null;
   const r = new SR();
   r.lang = 'ca-ES';
-  r.continuous = true;
+  r.continuous = false;
   r.interimResults = true;
   return r;
 }
@@ -603,19 +606,41 @@ function toggleVeu(){
     return;
   }
   if(recognizing){
-    recognition.stop();
     recognizing = false;
+    try{ recognition.stop(); }catch(e){}
     btn.textContent = '🎤 Dictar per veu';
     return;
   }
-  let baseText = textarea.value ? textarea.value + ' ' : '';
+
+  let textBase = textarea.value ? textarea.value.trim() + ' ' : '';
+
   recognition.onresult = (e)=>{
-    let text = '';
-    for(let i=0;i<e.results.length;i++){ text += e.results[i][0].transcript; }
-    textarea.value = baseText + text;
+    let finalText = '';
+    let interimText = '';
+    for(let i = e.resultIndex; i < e.results.length; i++){
+      const transcript = e.results[i][0].transcript;
+      if(e.results[i].isFinal){
+        finalText += transcript + ' ';
+      } else {
+        interimText += transcript;
+      }
+    }
+    if(finalText){ textBase += finalText; }
+    textarea.value = (textBase + interimText).replace(/\s+/g,' ');
   };
-  recognition.onerror = ()=>{ recognizing=false; btn.textContent='🎤 Dictar per veu'; };
-  recognition.onend = ()=>{ recognizing=false; btn.textContent='🎤 Dictar per veu'; };
+  recognition.onerror = (e)=>{
+    if(e.error === 'no-speech' || e.error === 'aborted') return;
+    recognizing = false;
+    btn.textContent = '🎤 Dictar per veu';
+  };
+  recognition.onend = ()=>{
+    if(recognizing){
+      try{ recognition.start(); }catch(e){}
+    } else {
+      btn.textContent = '🎤 Dictar per veu';
+    }
+  };
+
   recognition.start();
   recognizing = true;
   btn.textContent = '⏹ Atura el dictat';
@@ -634,6 +659,18 @@ async function guardarNota(){
   document.getElementById('notaText').value = '';
   toast(document.getElementById('notaStatus'), 'Descripció guardada.', 'ok');
   renderHistorial();
+}
+function descartarNota(){
+  const textarea = document.getElementById('notaText');
+  if(!textarea.value.trim()) return;
+  if(!confirm('Descartar aquesta descripció? Es perdrà el text.')) return;
+  if(recognizing){
+    recognizing = false;
+    try{ recognition.stop(); }catch(e){}
+    document.getElementById('btnVeu').textContent = '🎤 Dictar per veu';
+  }
+  textarea.value = '';
+  toast(document.getElementById('notaStatus'), 'Descripció descartada.', 'warn');
 }
 
 /* ============ RENDER "AVUI" (fotos i materials del dia) ============ */
