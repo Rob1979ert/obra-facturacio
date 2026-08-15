@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Gestió d'Obra</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
     --blue:#1a56db; --blue-dark:#1543a8; --green:#0e9f6e; --red:#e02424;
@@ -206,6 +207,18 @@
         <input type="number" id="mdPreuHora" step="0.5" value="30">
         <button class="btn-outline" onclick="guardarLesMevesDades()">Guardar dades</button>
         <div id="mdStatus"></div>
+      </details>
+    </div>
+
+    <div class="card">
+      <details>
+        <summary>📥 Importar preus des d'Excel (ROQUETA / Altres obres)</summary>
+        <p class="footnote">Selecciona el fitxer .xlsx. Es llegiran totes les pestanyes buscant columnes de descripció i preu, i es calcularà el preu de venda aplicant el marge indicat sobre el preu trobat. Revisa'n uns quants després d'importar per confirmar que s'han llegit bé.</p>
+        <label>Marge a aplicar (%)</label>
+        <input type="number" id="margeImport" value="30" step="1">
+        <input type="file" id="excelImportInput" accept=".xlsx,.xls" style="display:none;" onchange="importarPreusExcel(event)">
+        <button class="btn-outline" onclick="document.getElementById('excelImportInput').click()">Selecciona l'arxiu Excel</button>
+        <div id="importStatus"></div>
       </details>
     </div>
 
@@ -423,8 +436,6 @@ function getGeo(){
     );
   });
 }
-/* Versió amb límit de temps garantit: mai bloqueja més del timeoutMs indicat,
-   encara que el GPS del mòbil trigui o quedi penjat esperant el permís. */
 function getGeoQuick(timeoutMs){
   timeoutMs = timeoutMs || 4000;
   return new Promise((resolve)=>{
@@ -828,7 +839,7 @@ function afegirConcepte(desc, qty, preu){
   div.innerHTML = `
     <div class="desc"><input type="text" list="materialsHistoric" placeholder="Descripció" value="${desc?desc.replace(/"/g,'&quot;'):''}" oninput="onDescConcepteInput(this)"></div>
     <div class="qty"><input type="number" placeholder="Qtat" step="0.01" value="${qty!=null?qty:1}" oninput="recalcularTotals()"></div>
-    <div class="preu"><input type="number" placeholder="Preu €" step="0.01" value="${preu!=null?preu:''}" oninput="recalcularTotals()"></div>
+    <div class="preu"><input type="number" placeholder="Preu €" step="0.01" value="${preu!=null?preu:''}" oninput="recalcularTotals()" onblur="onPreuConcepteInput(this)"></div>
     <button type="button" class="del" onclick="document.getElementById('${id}').remove(); recalcularTotals();">✕</button>
   `;
   document.getElementById('conceptesLlista').appendChild(div);
@@ -846,6 +857,75 @@ function onDescConcepteInput(inputEl){
     }
   }
   recalcularTotals();
+}
+function onPreuConcepteInput(inputEl){
+  const row = inputEl.closest('.concepte-row');
+  if(!row) return;
+  const descInput = row.querySelector('.desc input');
+  const desc = descInput ? descInput.value.trim() : '';
+  const preu = parseFloat(inputEl.value) || 0;
+  if(desc && preu > 0){
+    const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
+    hist[desc.toLowerCase()] = {desc, preu, updated: ara()};
+    localStorage.setItem('historicMaterials', JSON.stringify(hist));
+    refrescarDatalistMaterials();
+  }
+}
+async function importarPreusExcel(event){
+  const file = event.target.files[0];
+  if(!file) return;
+  const statusEl = document.getElementById('importStatus');
+  if(typeof XLSX === 'undefined'){
+    toast(statusEl, 'No s\'ha pogut carregar la llibreria de lectura d\'Excel (revisa la connexió a internet).', 'warn');
+    event.target.value = '';
+    return;
+  }
+  const marge = parseFloat(document.getElementById('margeImport').value) || 30;
+  toast(statusEl, 'Llegint arxiu...', 'ok');
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, {type:'array'});
+    const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
+    let comptador = 0;
+    const diacritics = new RegExp('[' + String.fromCharCode(0x300) + '-' + String.fromCharCode(0x36f) + ']', 'g');
+    const normalitza = s => String(s||'').toLowerCase().normalize('NFD').replace(diacritics, '');
+
+    wb.SheetNames.forEach(nomFull=>{
+      const sheet = wb.Sheets[nomFull];
+      const files = XLSX.utils.sheet_to_json(sheet, {header:1, defval:''});
+      if(files.length < 2) return;
+
+      let headerRowIdx = 0;
+      for(let i=0;i<Math.min(files.length,5);i++){
+        const textCells = files[i].filter(c=>typeof c==='string' && c.trim()!=='').length;
+        if(textCells >= 2){ headerRowIdx = i; break; }
+      }
+      const headersNorm = files[headerRowIdx].map(normalitza);
+
+      let colDesc = headersNorm.findIndex(h=> h.includes('definicio') || h.includes('descripcio') || h.includes('material'));
+      let colPreu = headersNorm.findIndex(h=> h.includes('preu') && h.includes('descompte'));
+      if(colPreu === -1) colPreu = headersNorm.findIndex(h=> h.includes('preu') && h.includes('unitari'));
+      if(colPreu === -1) colPreu = headersNorm.findIndex(h=> h.includes('preu') && !h.includes('total'));
+      if(colDesc === -1 || colPreu === -1) return;
+
+      for(let i=headerRowIdx+1; i<files.length; i++){
+        const fila = files[i];
+        const desc = String(fila[colDesc]||'').trim();
+        const preuCost = parseFloat(String(fila[colPreu]||'').replace(',','.').replace(/[^\d.-]/g,''));
+        if(!desc || isNaN(preuCost) || preuCost<=0) continue;
+        const preuVenda = +(preuCost * (1 + marge/100)).toFixed(2);
+        hist[desc.toLowerCase()] = {desc, preu: preuVenda, updated: ara(), origen: nomFull};
+        comptador++;
+      }
+    });
+
+    localStorage.setItem('historicMaterials', JSON.stringify(hist));
+    refrescarDatalistMaterials();
+    toast(statusEl, `Importats ${comptador} preus (marge del ${marge}% ja aplicat).`, comptador>0?'ok':'warn');
+  }catch(err){
+    toast(statusEl, 'Error llegint l\'arxiu: ' + err.message, 'warn');
+  }
+  event.target.value = '';
 }
 function refrescarDatalistMaterials(){
   const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
@@ -912,8 +992,6 @@ async function omplirDesDeAvui(){
   if(horesTotal > 0){
     afegirConcepte(`Mà d'obra — ${obraActual} (${fmtData(avuiISO())})`, horesTotal, preuHora);
   }
-  // Cada punt/paràgraf de la descripció es converteix en una línia independent,
-  // en lloc de quedar tot amuntegat en una sola frase.
   notes.forEach(n=>{
     (n.notaText || '').split(/\n+/).map(t=>t.trim()).filter(Boolean).forEach(linia=>{
       const hist = JSON.parse(localStorage.getItem('historicMaterials') || '{}');
