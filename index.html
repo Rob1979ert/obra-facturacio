@@ -415,6 +415,21 @@ function getGeo(){
     );
   });
 }
+/* Versió amb límit de temps garantit: mai bloqueja més del timeoutMs indicat,
+   encara que el GPS del mòbil trigui o quedi penjat esperant el permís. */
+function getGeoQuick(timeoutMs){
+  timeoutMs = timeoutMs || 4000;
+  return new Promise((resolve)=>{
+    let done = false;
+    const t = setTimeout(()=>{ if(!done){ done=true; resolve(null); } }, timeoutMs);
+    if(!navigator.geolocation){ clearTimeout(t); resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos=>{ if(!done){ done=true; clearTimeout(t); resolve({lat:pos.coords.latitude, lon:pos.coords.longitude}); } },
+      ()=>{ if(!done){ done=true; clearTimeout(t); resolve(null); } },
+      {enableHighAccuracy:true, timeout:timeoutMs}
+    );
+  });
+}
 
 /* ============ OBRES ============ */
 function refrescarSelectObres(){
@@ -449,41 +464,53 @@ document.addEventListener('DOMContentLoaded', ()=>{
 });
 
 /* ============ JORNADA (CHECK-IN / CHECK-OUT) ============ */
-async function fitxarEntrada(){
+function fitxarEntrada(){
   if(!obraActual){ alert('Selecciona primer una obra.'); return; }
-  const geo = await getGeo();
   jornadaActiva = {
     obra: obraActual,
     data: avuiISO(),
     horaEntrada: ara(),
-    lat: geo ? geo.lat : null,
-    lon: geo ? geo.lon : null
+    lat: null,
+    lon: null
   };
   localStorage.setItem('jornadaActiva', JSON.stringify(jornadaActiva));
   actualitzarEstatJornada();
+  toast(document.getElementById('jornadaStatus'), `Entrada fitxada a les ${fmtHora(jornadaActiva.horaEntrada)}`, 'ok');
+  getGeoQuick(4000).then(geo=>{
+    if(geo && jornadaActiva){
+      jornadaActiva.lat = geo.lat;
+      jornadaActiva.lon = geo.lon;
+      localStorage.setItem('jornadaActiva', JSON.stringify(jornadaActiva));
+    }
+  });
 }
 async function fitxarSortida(){
-  if(!jornadaActiva) return;
-  const geo = await getGeo();
+  if(!jornadaActiva){
+    toast(document.getElementById('jornadaStatus'), 'No hi ha cap entrada activa per tancar.', 'warn');
+    return;
+  }
+  const jornadaGuardada = jornadaActiva;
   const horaSortida = ara();
-  const ms = new Date(horaSortida) - new Date(jornadaActiva.horaEntrada);
+  const ms = new Date(horaSortida) - new Date(jornadaGuardada.horaEntrada);
   const hores = +(ms / 3600000).toFixed(2);
-  await afegirEntry({
-    tipus: 'jornada',
-    obra: jornadaActiva.obra,
-    data: jornadaActiva.data,
-    horaEntrada: jornadaActiva.horaEntrada,
-    horaSortida: horaSortida,
-    horesTreballades: hores,
-    latEntrada: jornadaActiva.lat,
-    lonEntrada: jornadaActiva.lon,
-    latSortida: geo ? geo.lat : null,
-    lonSortida: geo ? geo.lon : null,
-    timestamp: ara()
-  });
   jornadaActiva = null;
   localStorage.removeItem('jornadaActiva');
+  const geoSortida = await getGeoQuick(4000);
+  await afegirEntry({
+    tipus: 'jornada',
+    obra: jornadaGuardada.obra,
+    data: jornadaGuardada.data,
+    horaEntrada: jornadaGuardada.horaEntrada,
+    horaSortida: horaSortida,
+    horesTreballades: hores,
+    latEntrada: jornadaGuardada.lat,
+    lonEntrada: jornadaGuardada.lon,
+    latSortida: geoSortida ? geoSortida.lat : null,
+    lonSortida: geoSortida ? geoSortida.lon : null,
+    timestamp: ara()
+  });
   actualitzarEstatJornada();
+  toast(document.getElementById('jornadaStatus'), `Jornada guardada: ${hores} h (${fmtHora(jornadaGuardada.horaEntrada)} → ${fmtHora(horaSortida)})`, 'ok');
   renderHistorial();
 }
 function actualitzarEstatJornada(){
@@ -616,13 +643,23 @@ async function refrescarSeccionsAvui(){
 
   const fotos = avui.filter(e=>e.tipus==='foto');
   document.getElementById('fotosAvui').innerHTML = fotos.map(f =>
-    `<img class="thumb" src="${f.fotoDataUrl}">`
+    `<div class="entry"><img class="thumb" src="${f.fotoDataUrl}">
+      <button class="btn-danger btn-small" onclick="eliminarEntryAvui(${f.id})">Eliminar</button>
+    </div>`
   ).join('') || '';
 
   const materials = avui.filter(e=>e.tipus==='material');
   document.getElementById('materialsAvui').innerHTML = materials.map(m =>
-    `<div class="entry"><span class="tag">material</span>${m.materialDescripcio} — ${m.materialQuantitat} ${m.materialUnitat}</div>`
+    `<div class="entry"><span class="tag">material</span>${m.materialDescripcio} — ${m.materialQuantitat} ${m.materialUnitat}
+      <button class="btn-danger btn-small" onclick="eliminarEntryAvui(${m.id})">Eliminar</button>
+    </div>`
   ).join('') || '';
+}
+async function eliminarEntryAvui(id){
+  if(!confirm('Eliminar aquest registre? (per modificar-lo, esborra\'l i torna\'l a afegir amb les dades correctes)')) return;
+  await esborrarEntry(id);
+  refrescarSeccionsAvui();
+  renderHistorial();
 }
 
 /* ============ HISTORIAL ============ */
@@ -836,7 +873,6 @@ async function generarFactura(){
   };
   await afegirFactura(factura);
 
-  // actualitza el suggeriment del proper número si aquest és numèric i >= a l'actual
   const numActual = parseInt(numero.replace(/\D/g,''));
   const suggeritActual = parseInt(String(proximNumeroSuggerit()).replace(/\D/g,''));
   if(!isNaN(numActual) && numActual >= suggeritActual){
